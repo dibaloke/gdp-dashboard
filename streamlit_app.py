@@ -1,151 +1,186 @@
+# Filename: interactive_regression_applet_logalpha.py
+
 import streamlit as st
+import numpy as np
 import pandas as pd
-import math
-from pathlib import Path
+from sklearn.linear_model import Ridge, Lasso, ElasticNet, LinearRegression
+from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
+st.set_page_config(layout="wide")
+st.title("Interactive Regression Explorer: OLS, Ridge, Lasso, ElasticNet (Log-scale alpha)")
+
+# ---------------------------
+# Sidebar controls
+# ---------------------------
+st.sidebar.header("Model Controls")
+
+# Select multiple models for comparison
+model_types = st.sidebar.multiselect(
+    "Select Regression Models",
+    ["OLS", "Ridge", "Lasso", "ElasticNet"],
+    default=["OLS", "Ridge"]
 )
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+fit_intercept = st.sidebar.checkbox("Fit Intercept", value=True)
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
-
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
-
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
-
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
-
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
-
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
-
-    return gdp_df
-
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
+# Log-scale alpha slider: user selects log10(alpha)
+log_alpha = st.sidebar.slider(
+    "Regularization strength alpha (log10 scale for Ridge/Lasso/ElasticNet)", 
+    -3.0, 3.0, 0.0, 0.1
 )
+alpha = 10 ** log_alpha  # Convert log scale to actual alpha
 
-''
-''
+l1_ratio = st.sidebar.slider("L1 ratio (ElasticNet only)", 0.0, 1.0, 0.5, 0.05)
+noise_level = st.sidebar.slider("Noise level in data", 0.0, 5.0, 0.5, 0.1)
 
+# ---------------------------
+# Generate synthetic dataset
+# ---------------------------
+np.random.seed(42)
+n_samples, n_features = 50, 5
+feature_names = [f"x{i+1}" for i in range(n_features)]
 
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
+# True coefficients
+true_coef = np.array([1.5, -2.0, 0.0, 0.5, 3.0])
 
-st.header(f'GDP in {to_year}', divider='gray')
+# Generate features
+X = np.random.randn(n_samples, n_features)
 
-''
+# Generate response with controllable noise
+y = X @ true_coef + np.random.randn(n_samples) * noise_level
 
-cols = st.columns(4)
+# Scale features
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
 
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
+# ---------------------------
+# Interactive sliders for input features
+# ---------------------------
+st.sidebar.header("Input Feature Values")
+input_features = []
+for i, name in enumerate(feature_names):
+    val = st.sidebar.slider(name, float(X[:, i].min()), float(X[:, i].max()), float(X[:, i].mean()))
+    input_features.append(val)
+input_features_scaled = scaler.transform([input_features])
 
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
+# ---------------------------
+# Fit models and display coefficients and equations
+# ---------------------------
+st.subheader("Regression Coefficients and Equations")
+coef_df = pd.DataFrame({"Feature": feature_names})
+equation_texts = []
+pred_input_dict = {}
 
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
+for mtype in model_types:
+    if mtype == "OLS":
+        model = LinearRegression(fit_intercept=fit_intercept)
+    elif mtype == "Ridge":
+        model = Ridge(alpha=alpha, fit_intercept=fit_intercept)
+    elif mtype == "Lasso":
+        model = Lasso(alpha=alpha, fit_intercept=fit_intercept, max_iter=10000)
+    elif mtype == "ElasticNet":
+        model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, fit_intercept=fit_intercept, max_iter=10000)
+    
+    model.fit(X_scaled, y)
+    
+    # Store coefficients
+    coef_df[mtype] = model.coef_
+    
+    # Build regression equation
+    equation = f"{mtype}: y = {model.intercept_:.3f}"
+    for i, c in enumerate(model.coef_):
+        sign = " + " if c >= 0 else " - "
+        equation += f"{sign}{abs(c):.3f}*{feature_names[i]}"
+    equation_texts.append(equation)
+    
+    # Prediction for user-defined input
+    pred_input_dict[mtype] = model.predict(input_features_scaled)[0]
 
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+# Display coefficients
+st.table(coef_df)
+
+# Display equations
+st.subheader("Regression Equations")
+for eq in equation_texts:
+    st.code(eq)
+
+# ---------------------------
+# Display prediction for input features
+# ---------------------------
+st.subheader("Prediction for Input Features")
+st.write(pred_input_dict)
+
+# ---------------------------
+# Plot predictions vs true values
+# ---------------------------
+st.subheader("Predictions vs True Values")
+pred_all_dict = {}
+for mtype in model_types:
+    if mtype == "OLS":
+        model = LinearRegression(fit_intercept=fit_intercept)
+    elif mtype == "Ridge":
+        model = Ridge(alpha=alpha, fit_intercept=fit_intercept)
+    elif mtype == "Lasso":
+        model = Lasso(alpha=alpha, fit_intercept=fit_intercept, max_iter=10000)
+    elif mtype == "ElasticNet":
+        model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, fit_intercept=fit_intercept, max_iter=10000)
+    
+    model.fit(X_scaled, y)
+    pred_all_dict[mtype] = model.predict(X_scaled)
+
+df_plot = pd.DataFrame(pred_all_dict)
+df_plot["True"] = y
+st.line_chart(df_plot)
+
+# ---------------------------
+# Coefficient regularization path
+# ---------------------------
+if any(m in ["Ridge", "Lasso", "ElasticNet"] for m in model_types):
+    st.subheader("Coefficient Regularization Path")
+    alphas = np.logspace(-3, 3, 50)  # Match log scale slider
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    for mtype in model_types:
+        if mtype == "OLS":
+            continue
+        coefs_path = []
+        for a in alphas:
+            if mtype == "Ridge":
+                m = Ridge(alpha=a, fit_intercept=fit_intercept)
+            elif mtype == "Lasso":
+                m = Lasso(alpha=a, fit_intercept=fit_intercept, max_iter=10000)
+            elif mtype == "ElasticNet":
+                m = ElasticNet(alpha=a, l1_ratio=l1_ratio, fit_intercept=fit_intercept, max_iter=10000)
+            m.fit(X_scaled, y)
+            coefs_path.append(m.coef_)
+        coefs_path = np.array(coefs_path)
+        for i in range(n_features):
+            ax.plot(alphas, coefs_path[:, i], label=f"{mtype}-{feature_names[i]}")
+    
+    ax.set_xscale('log')
+    ax.set_xlabel("Alpha (log scale)")
+    ax.set_ylabel("Coefficient value")
+    ax.set_title("Regularization Path")
+    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    st.pyplot(fig)
+
+# ---------------------------
+# Real-time bar chart: True vs predicted coefficients
+# ---------------------------
+st.subheader("True vs Predicted Coefficients")
+for mtype in model_types:
+    fig, ax = plt.subplots(figsize=(8, 5))
+    width = 0.35
+    indices = np.arange(n_features)
+    
+    ax.bar(indices - width/2, true_coef, width, label="True", color="skyblue")
+    ax.bar(indices + width/2, coef_df[mtype], width, label=mtype, color="orange")
+    
+    ax.set_xticks(indices)
+    ax.set_xticklabels(feature_names)
+    ax.set_ylabel("Coefficient value")
+    ax.set_title(f"True vs {mtype} Coefficients")
+    ax.legend()
+    
+    st.pyplot(fig)
